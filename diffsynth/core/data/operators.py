@@ -307,13 +307,19 @@ class LoadAudioWithTorchaudio(DataProcessingOperator, FrameSamplerByRateMixin):
     def __init__(self, num_frames=121, time_division_factor=8, time_division_remainder=1, frame_rate=24, fix_frame_rate=True):
         FrameSamplerByRateMixin.__init__(self, num_frames, time_division_factor, time_division_remainder, frame_rate, fix_frame_rate)
 
-    def __call__(self, data: str):
+    def get_target_duration(self, data: str):
         try:
             reader = self.get_reader(data)
             num_frames = self.get_num_frames(reader)
-            duration = num_frames / self.frame_rate
+            reader.close()
+            return num_frames / self.frame_rate
+        except Exception:
+            return self.num_frames / self.frame_rate
+
+    def __call__(self, data: str):
+        try:
             waveform, sample_rate = torchaudio.load(data)
-            target_samples = int(duration * sample_rate)
+            target_samples = max(1, int(self.get_target_duration(data) * sample_rate))
             current_samples = waveform.shape[-1]
             if current_samples > target_samples:
                 waveform = waveform[..., :target_samples]
@@ -321,6 +327,6 @@ class LoadAudioWithTorchaudio(DataProcessingOperator, FrameSamplerByRateMixin):
                 padding = target_samples - current_samples
                 waveform = torch.nn.functional.pad(waveform, (0, padding))
             return waveform, sample_rate
-        except:
-            warnings.warn(f"Cannot load audio in {data}. The audio will be `None`.")
+        except Exception as error:
+            warnings.warn(f"Cannot load audio in {data}: {error}. The audio will be `None`.")
             return None

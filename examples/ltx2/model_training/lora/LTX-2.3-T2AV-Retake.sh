@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../../../.." && pwd)"
+cd "${REPO_ROOT}"
+
 # Recommended metadata format: JSON or JSONL.
 # Required fields for every sample:
 #   video, input_audio
@@ -18,24 +22,99 @@ set -euo pipefail
 
 DATASET_BASE_PATH="${DATASET_BASE_PATH:-/mnt/bn/genai-nebula/wangjie/Video_Gen_Long/DiffSynth-Studio/data/train_data}"
 DATASET_METADATA_PATH="${DATASET_METADATA_PATH:-${DATASET_BASE_PATH}/metadata_audio_hybrid.json}"
-HEIGHT="${HEIGHT:-384}"
-WIDTH="${WIDTH:-672}"
-NUM_FRAMES="${NUM_FRAMES:-81}"
+MODEL_SOURCE_BASE_PATH="${MODEL_SOURCE_BASE_PATH:-/mnt/bn/genai-nebula/wangjie/Video_Gen_Long/DiffSynth-Studio/models}"
+SHM_MODEL_BASE_PATH="${SHM_MODEL_BASE_PATH:-/dev/shm/diffsynth_models}"
+MODEL_CACHE_MODE="${MODEL_CACHE_MODE:-copy}"
+RUN_DATA_PRECHECK="${RUN_DATA_PRECHECK:-1}"
+MIN_EDIT_REGION_SECONDS="${MIN_EDIT_REGION_SECONDS:-0.25}"
+HEIGHT="${HEIGHT:-}"
+WIDTH="${WIDTH:-}"
+MAX_PIXELS="${MAX_PIXELS:-921600}"
+NUM_FRAMES="${NUM_FRAMES:-481}"
 FRAME_RATE="${FRAME_RATE:-24}"
 NUM_EPOCHS="${NUM_EPOCHS:-3}"
 LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 LORA_RANK="${LORA_RANK:-16}"
 DATASET_REPEAT="${DATASET_REPEAT:-50}"
-OUTPUT_NAME="${OUTPUT_NAME:-LTX2.3-V2AV-AudioHybrid_lora}"
+OUTPUT_NAME="${OUTPUT_NAME:-LTX2.3-T2AV-Retake_lora}"
+
+VIDEO_SIZE_ARGS=(--max_pixels "${MAX_PIXELS}" --num_frames "${NUM_FRAMES}")
+if [[ -n "${HEIGHT}" || -n "${WIDTH}" ]]; then
+  if [[ -z "${HEIGHT}" || -z "${WIDTH}" ]]; then
+    echo "HEIGHT and WIDTH must be set together. Leave both empty to enable dynamic resolution." >&2
+    exit 1
+  fi
+  VIDEO_SIZE_ARGS+=(--height "${HEIGHT}" --width "${WIDTH}")
+fi
+
+require_path() {
+  local path="$1"
+  if [[ ! -e "${path}" ]]; then
+    echo "Required path does not exist: ${path}" >&2
+    exit 1
+  fi
+}
+
+prepare_model_cache() {
+  local source_dir="$1"
+  local relative_dir="$2"
+  local target_dir="${SHM_MODEL_BASE_PATH}/${relative_dir}"
+  local ready_file="${target_dir}/.diffsynth_shm_ready"
+
+  require_path "${source_dir}"
+  if [[ -f "${ready_file}" ]]; then
+    return
+  fi
+
+  mkdir -p "$(dirname "${target_dir}")"
+  if [[ "${MODEL_CACHE_MODE}" == "copy" ]]; then
+    if [[ -L "${target_dir}" ]]; then
+      echo "Cannot copy model cache over symlink: ${target_dir}" >&2
+      echo "Use a fresh SHM_MODEL_BASE_PATH or set MODEL_CACHE_MODE=symlink." >&2
+      exit 1
+    fi
+    mkdir -p "${target_dir}"
+    cp -a "${source_dir}/." "${target_dir}/"
+    touch "${ready_file}"
+  elif [[ "${MODEL_CACHE_MODE}" == "symlink" ]]; then
+    if [[ ! -e "${target_dir}" && ! -L "${target_dir}" ]]; then
+      ln -s "${source_dir}" "${target_dir}"
+    fi
+  elif [[ "${MODEL_CACHE_MODE}" == "none" ]]; then
+    return
+  else
+    echo "Unsupported MODEL_CACHE_MODE=${MODEL_CACHE_MODE}. Use copy, symlink, or none." >&2
+    exit 1
+  fi
+}
+
+if [[ "${RUN_DATA_PRECHECK}" == "1" ]]; then
+  python3 examples/ltx2/model_training/lora/precheck_audio_hybrid_dataset.py \
+    --dataset_base_path "${DATASET_BASE_PATH}" \
+    --dataset_metadata_path "${DATASET_METADATA_PATH}" \
+    --num_frames "${NUM_FRAMES}" \
+    --frame_rate "${FRAME_RATE}" \
+    --min_edit_region_seconds "${MIN_EDIT_REGION_SECONDS}"
+fi
+
+prepare_model_cache "${MODEL_SOURCE_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage" "DiffSynth-Studio/LTX-2.3-Repackage"
+prepare_model_cache "${MODEL_SOURCE_BASE_PATH}/google/gemma-3-12b-it-qat-q4_0-unquantized" "google/gemma-3-12b-it-qat-q4_0-unquantized"
+
+require_path "${SHM_MODEL_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/text_encoder_post_modules.safetensors"
+require_path "${SHM_MODEL_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/video_vae_encoder.safetensors"
+require_path "${SHM_MODEL_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/audio_vae_encoder.safetensors"
+require_path "${SHM_MODEL_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/transformer.safetensors"
+require_path "${SHM_MODEL_BASE_PATH}/google/gemma-3-12b-it-qat-q4_0-unquantized"
+
+export DIFFSYNTH_MODEL_BASE_PATH="${SHM_MODEL_BASE_PATH}"
+export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
 
 accelerate launch examples/ltx2/model_training/train.py \
   --dataset_base_path "${DATASET_BASE_PATH}" \
   --dataset_metadata_path "${DATASET_METADATA_PATH}" \
   --data_file_keys "video,input_audio,retake_audio" \
   --extra_inputs "input_audio,retake_audio,retake_audio_regions" \
-  --height "${HEIGHT}" \
-  --width "${WIDTH}" \
-  --num_frames "${NUM_FRAMES}" \
+  "${VIDEO_SIZE_ARGS[@]}" \
   --frame_rate "${FRAME_RATE}" \
   --dataset_repeat 1 \
   --model_id_with_origin_paths "DiffSynth-Studio/LTX-2.3-Repackage:text_encoder_post_modules.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:video_vae_encoder.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:audio_vae_encoder.safetensors,google/gemma-3-12b-it-qat-q4_0-unquantized:model-*.safetensors" \
@@ -55,9 +134,7 @@ accelerate launch examples/ltx2/model_training/train.py \
   --dataset_base_path "./models/train/${OUTPUT_NAME}-splited-cache" \
   --data_file_keys "video,input_audio,retake_audio" \
   --extra_inputs "input_audio,retake_audio,retake_audio_regions" \
-  --height "${HEIGHT}" \
-  --width "${WIDTH}" \
-  --num_frames "${NUM_FRAMES}" \
+  "${VIDEO_SIZE_ARGS[@]}" \
   --frame_rate "${FRAME_RATE}" \
   --dataset_repeat "${DATASET_REPEAT}" \
   --model_id_with_origin_paths "DiffSynth-Studio/LTX-2.3-Repackage:transformer.safetensors" \

@@ -1,21 +1,42 @@
-import torch, os, argparse, accelerate, warnings
+import torch, os, argparse, accelerate, warnings, math
 from diffsynth.core import UnifiedDataset
-from diffsynth.core.data.operators import LoadAudioWithTorchaudio, ToAbsolutePath, RouteByType, SequencialProcess, DataProcessingOperatorRaw
+from diffsynth.core.data.operators import LoadAudioWithTorchaudio, RouteByType, SequencialProcess
 from diffsynth.pipelines.ltx2_audio_video import LTX2AudioVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+
+def is_missing_value(value):
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    if isinstance(value, str) and value.strip().lower() in ("", "nan", "none", "null"):
+        return True
+    return False
+
+
+class OptionalAudioLoader:
+    def __init__(self, base_path, num_frames, frame_rate):
+        self.base_path = base_path
+        self.audio_loader = LoadAudioWithTorchaudio(
+            num_frames=num_frames,
+            time_division_factor=8,
+            time_division_remainder=1,
+            frame_rate=frame_rate,
+        )
+
+    def __call__(self, data):
+        if is_missing_value(data):
+            return None
+        data = str(data)
+        if not os.path.isabs(data):
+            data = os.path.join(self.base_path, data)
+        return self.audio_loader(data)
+
+
 def build_optional_audio_operator(base_path, num_frames, frame_rate):
-    audio_loader = ToAbsolutePath(base_path) >> LoadAudioWithTorchaudio(
-        num_frames=num_frames,
-        time_division_factor=8,
-        time_division_remainder=1,
-        frame_rate=frame_rate,
-    )
-    return RouteByType(operator_map=[
-        (str, audio_loader),
-        (type(None), DataProcessingOperatorRaw()),
-    ])
+    return OptionalAudioLoader(base_path, num_frames, frame_rate)
 
 
 class LTX2TrainingModule(DiffusionTrainingModule):
@@ -98,7 +119,14 @@ class LTX2TrainingModule(DiffusionTrainingModule):
                 inputs_shared[extra_input] = data.get(extra_input)
         return inputs_shared
     
+    def validate_training_inputs(self, data):
+        if self.audio_loss_weight != 0 and data.get("input_audio") is None:
+            raise ValueError("audio_loss_weight is non-zero, but input_audio failed to load or is missing.")
+        if data.get("retake_audio") is not None and not data.get("retake_audio_regions"):
+            raise ValueError("retake_audio is provided, but retake_audio_regions is missing or empty.")
+
     def get_pipeline_inputs(self, data):
+        self.validate_training_inputs(data)
         inputs_posi = {"prompt": data.get("prompt", "")}
         inputs_nega = {}
         inputs_shared = {

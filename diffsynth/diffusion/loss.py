@@ -2,6 +2,17 @@ from .base_pipeline import BasePipeline
 import torch
 
 
+def _masked_mse_loss(pred, target, mask=None, empty_mask_message="Mask has no active elements."):
+    diff = torch.nn.functional.mse_loss(pred.float(), target.float(), reduction="none")
+    if mask is None:
+        return diff.mean()
+    mask = mask.to(device=diff.device, dtype=diff.dtype).expand_as(diff)
+    mask_sum = mask.sum()
+    if mask_sum <= 0:
+        raise ValueError(empty_mask_message)
+    return (diff * mask).sum() / mask_sum
+
+
 def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
     max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps))
     min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
@@ -33,6 +44,8 @@ def FlowMatchSFTAudioVideoLoss(pipe: BasePipeline, **inputs):
     min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
     video_loss_weight = float(inputs.get("video_loss_weight", 1.0))
     audio_loss_weight = float(inputs.get("audio_loss_weight", 1.0))
+    if audio_loss_weight != 0 and inputs.get("audio_input_latents") is None:
+        raise ValueError("audio_loss_weight is non-zero, but audio_input_latents is missing from the sample/cache.")
 
     timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
     timestep = pipe.scheduler.timesteps[timestep_id].to(dtype=pipe.torch_dtype, device=pipe.device)
@@ -56,7 +69,12 @@ def FlowMatchSFTAudioVideoLoss(pipe: BasePipeline, **inputs):
         loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
         loss = loss * pipe.scheduler.training_weight(timestep) * video_loss_weight
     if inputs.get("audio_input_latents") is not None and audio_loss_weight != 0:
-        loss_audio = torch.nn.functional.mse_loss(noise_pred_audio.float(), training_target_audio.float())
+        loss_audio = _masked_mse_loss(
+            noise_pred_audio,
+            training_target_audio,
+            inputs.get("denoise_mask_audio"),
+            empty_mask_message="retake_audio is provided but retake_audio_regions selects no audio latents.",
+        )
         loss_audio = loss_audio * pipe.scheduler.training_weight(timestep) * audio_loss_weight
         loss = loss_audio if loss is None else loss + loss_audio
     if loss is None:
