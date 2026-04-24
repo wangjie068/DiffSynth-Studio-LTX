@@ -47,6 +47,10 @@ if [[ -n "${HEIGHT}" || -n "${WIDTH}" ]]; then
   VIDEO_SIZE_ARGS+=(--height "${HEIGHT}" --width "${WIDTH}")
 fi
 
+log_step() {
+  echo "[LTX2 Retake] $*" >&2
+}
+
 require_path() {
   local path="$1"
   if [[ ! -e "${path}" ]]; then
@@ -63,6 +67,7 @@ prepare_model_cache() {
 
   require_path "${source_dir}"
   if [[ -f "${ready_file}" ]]; then
+    log_step "Model cache ready: ${target_dir}"
     return
   fi
 
@@ -73,14 +78,18 @@ prepare_model_cache() {
       echo "Use a fresh SHM_MODEL_BASE_PATH or set MODEL_CACHE_MODE=symlink." >&2
       exit 1
     fi
+    log_step "Copying model cache to SHM: ${source_dir} -> ${target_dir}"
     mkdir -p "${target_dir}"
     cp -a "${source_dir}/." "${target_dir}/"
     touch "${ready_file}"
+    log_step "Model cache copied: ${target_dir}"
   elif [[ "${MODEL_CACHE_MODE}" == "symlink" ]]; then
     if [[ ! -e "${target_dir}" && ! -L "${target_dir}" ]]; then
+      log_step "Creating model cache symlink: ${target_dir} -> ${source_dir}"
       ln -s "${source_dir}" "${target_dir}"
     fi
   elif [[ "${MODEL_CACHE_MODE}" == "none" ]]; then
+    log_step "Skipping model cache for ${source_dir}"
     return
   else
     echo "Unsupported MODEL_CACHE_MODE=${MODEL_CACHE_MODE}. Use copy, symlink, or none." >&2
@@ -88,15 +97,20 @@ prepare_model_cache() {
   fi
 }
 
+log_step "Config: max_pixels=${MAX_PIXELS}, num_frames=${NUM_FRAMES}, frame_rate=${FRAME_RATE}, precheck=${RUN_DATA_PRECHECK}, cache_mode=${MODEL_CACHE_MODE}"
+
 if [[ "${RUN_DATA_PRECHECK}" == "1" ]]; then
+  log_step "Running dataset precheck: ${DATASET_METADATA_PATH}"
   python3 examples/ltx2/model_training/lora/precheck_audio_hybrid_dataset.py \
     --dataset_base_path "${DATASET_BASE_PATH}" \
     --dataset_metadata_path "${DATASET_METADATA_PATH}" \
     --num_frames "${NUM_FRAMES}" \
     --frame_rate "${FRAME_RATE}" \
     --min_edit_region_seconds "${MIN_EDIT_REGION_SECONDS}"
+  log_step "Dataset precheck finished"
 fi
 
+log_step "Preparing model cache"
 prepare_model_cache "${MODEL_SOURCE_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage" "DiffSynth-Studio/LTX-2.3-Repackage"
 prepare_model_cache "${MODEL_SOURCE_BASE_PATH}/google/gemma-3-12b-it-qat-q4_0-unquantized" "google/gemma-3-12b-it-qat-q4_0-unquantized"
 
@@ -109,6 +123,7 @@ require_path "${SHM_MODEL_BASE_PATH}/google/gemma-3-12b-it-qat-q4_0-unquantized"
 export DIFFSYNTH_MODEL_BASE_PATH="${SHM_MODEL_BASE_PATH}"
 export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
 
+log_step "Starting data-process stage"
 accelerate launch examples/ltx2/model_training/train.py \
   --dataset_base_path "${DATASET_BASE_PATH}" \
   --dataset_metadata_path "${DATASET_METADATA_PATH}" \
@@ -130,6 +145,7 @@ accelerate launch examples/ltx2/model_training/train.py \
   --use_gradient_checkpointing \
   --task "sft:data_process"
 
+log_step "Starting LoRA train stage"
 accelerate launch examples/ltx2/model_training/train.py \
   --dataset_base_path "./models/train/${OUTPUT_NAME}-splited-cache" \
   --data_file_keys "video,input_audio,retake_audio" \

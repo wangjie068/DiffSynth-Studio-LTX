@@ -4,6 +4,7 @@ import json
 import math
 import os
 import sys
+import warnings
 
 
 def is_missing_value(value):
@@ -65,8 +66,15 @@ def get_video_duration(path, frame_rate):
     try:
         metadata = reader.get_meta_data()
         raw_fps = float(metadata.get("fps") or frame_rate)
+        duration = metadata.get("duration")
+        total_frames = metadata.get("nframes")
+        if duration is not None and math.isfinite(float(duration)):
+            duration = float(duration)
+            if total_frames is None or total_frames == float("inf"):
+                total_frames = int(math.floor(duration * raw_fps))
+            return int(total_frames), raw_fps, duration
         total_frames = int(reader.count_frames())
-        duration = float(metadata.get("duration") or total_frames / raw_fps)
+        duration = total_frames / raw_fps
         return total_frames, raw_fps, duration
     finally:
         reader.close()
@@ -87,7 +95,10 @@ def get_training_duration(video_duration, num_frames, frame_rate):
 def check_audio(path):
     import torchaudio
 
-    waveform, sample_rate = torchaudio.load(path)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*torchaudio.load_with_torchcodec.*")
+        warnings.filterwarnings("ignore", message=".*StreamingMediaDecoder has been deprecated.*")
+        waveform, sample_rate = torchaudio.load(path)
     if waveform.numel() == 0 or waveform.shape[-1] == 0:
         raise ValueError("audio has zero samples")
     return waveform.shape[-1] / sample_rate
@@ -117,6 +128,7 @@ def build_parser():
     parser.add_argument("--frame_rate", type=float, default=24)
     parser.add_argument("--min_edit_region_seconds", type=float, default=0.25)
     parser.add_argument("--max_errors", type=int, default=20)
+    parser.add_argument("--progress_interval", type=int, default=25)
     return parser
 
 
@@ -125,12 +137,16 @@ def main():
     if not os.path.exists(args.dataset_metadata_path):
         raise FileNotFoundError(f"metadata not found: {args.dataset_metadata_path}")
 
+    print(f"[Precheck] Loading metadata: {args.dataset_metadata_path}", flush=True)
     rows = load_metadata(args.dataset_metadata_path)
+    print(f"[Precheck] Checking {len(rows)} samples...", flush=True)
     errors = []
     generation_count = 0
     edit_count = 0
 
     for index, row in enumerate(rows):
+        if args.progress_interval > 0 and index > 0 and index % args.progress_interval == 0:
+            print(f"[Precheck] Checked {index}/{len(rows)} samples...", flush=True)
         try:
             video_path = resolve_path(args.dataset_base_path, row.get("video"))
             input_audio_path = resolve_path(args.dataset_base_path, row.get("input_audio"))
@@ -165,15 +181,15 @@ def main():
             if len(errors) >= args.max_errors:
                 break
 
-    print(f"[Precheck] Samples: {len(rows)}")
-    print(f"[Precheck] Generation samples: {generation_count}")
-    print(f"[Precheck] Edit samples: {edit_count}")
+    print(f"[Precheck] Samples: {len(rows)}", flush=True)
+    print(f"[Precheck] Generation samples: {generation_count}", flush=True)
+    print(f"[Precheck] Edit samples: {edit_count}", flush=True)
     if errors:
         print("[Precheck] Errors:", file=sys.stderr)
         for error in errors:
             print(f"  - {error}", file=sys.stderr)
         raise SystemExit(1)
-    print("[Precheck] OK")
+    print("[Precheck] OK", flush=True)
 
 
 if __name__ == "__main__":
