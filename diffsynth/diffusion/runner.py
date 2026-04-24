@@ -30,20 +30,50 @@ def launch_training_task(
     model.to(device=accelerator.device)
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
     initialize_deepspeed_gradient_checkpointing(accelerator)
+    
+    if accelerator.is_main_process:
+        print("[Training] Starting training...")
+        print(f"[Training] Epochs: {num_epochs}")
+        print(f"[Training] Learning rate: {learning_rate}")
+        print(f"[Training] Dataset size: {len(dataset)}")
+    
+    global_step = 0
     for epoch_id in range(num_epochs):
-        for data in tqdm(dataloader):
+        if accelerator.is_main_process:
+            print(f"\n[Training] Epoch {epoch_id + 1}/{num_epochs}")
+        
+        epoch_loss = 0.0
+        num_batches = 0
+        
+        for data in tqdm(dataloader, disable=not accelerator.is_main_process):
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 if dataset.load_from_cache:
                     loss = model({}, inputs=data)
                 else:
                     loss = model(data)
+                
                 accelerator.backward(loss)
                 optimizer.step()
                 model_logger.on_step_end(accelerator, model, save_steps, loss=loss)
                 scheduler.step()
+                
+                epoch_loss += loss.item()
+                num_batches += 1
+                global_step += 1
+                
+                if accelerator.is_main_process and global_step % 10 == 0:
+                    print(f"[Training] Step {global_step}, Loss: {loss.item():.6f}")
+        
+        if accelerator.is_main_process:
+            avg_loss = epoch_loss / num_batches
+            print(f"[Training] Epoch {epoch_id + 1} completed. Average Loss: {avg_loss:.6f}")
+        
         if save_steps is None:
             model_logger.on_epoch_end(accelerator, model, epoch_id)
+    
+    if accelerator.is_main_process:
+        print("\n[Training] Training completed!")
     model_logger.on_training_end(accelerator, model, save_steps)
 
 
@@ -57,12 +87,18 @@ def launch_data_process_task(
 ):
     if args is not None:
         num_workers = args.dataset_num_workers
+    
+    if accelerator.is_main_process:
+        print("[DataProcess] Starting data preprocessing...")
+        print(f"[DataProcess] Dataset size: {len(dataset)}")
+        print(f"[DataProcess] Output path: {model_logger.output_path}")
         
     dataloader = torch.utils.data.DataLoader(dataset, shuffle=False, collate_fn=lambda x: x[0], num_workers=num_workers)
     model.to(device=accelerator.device)
     model, dataloader = accelerator.prepare(model, dataloader)
     
-    for data_id, data in enumerate(tqdm(dataloader)):
+    processed_count = 0
+    for data_id, data in enumerate(tqdm(dataloader, disable=not accelerator.is_main_process)):
         with accelerator.accumulate(model):
             with torch.no_grad():
                 folder = os.path.join(model_logger.output_path, str(accelerator.process_index))
@@ -70,6 +106,10 @@ def launch_data_process_task(
                 save_path = os.path.join(model_logger.output_path, str(accelerator.process_index), f"{data_id}.pth")
                 data = model(data)
                 torch.save(data, save_path)
+                processed_count += 1
+    
+    if accelerator.is_main_process:
+        print(f"[DataProcess] Data preprocessing completed! Saved {processed_count} files.")
 
 
 def initialize_deepspeed_gradient_checkpointing(accelerator: Accelerator):

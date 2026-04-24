@@ -1,9 +1,21 @@
 import torch, os, argparse, accelerate, warnings
 from diffsynth.core import UnifiedDataset
-from diffsynth.core.data.operators import LoadAudioWithTorchaudio, ToAbsolutePath, RouteByType, SequencialProcess
+from diffsynth.core.data.operators import LoadAudioWithTorchaudio, ToAbsolutePath, RouteByType, SequencialProcess, DataProcessingOperatorRaw
 from diffsynth.pipelines.ltx2_audio_video import LTX2AudioVideoPipeline, ModelConfig
 from diffsynth.diffusion import *
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+def build_optional_audio_operator(base_path, num_frames, frame_rate):
+    audio_loader = ToAbsolutePath(base_path) >> LoadAudioWithTorchaudio(
+        num_frames=num_frames,
+        time_division_factor=8,
+        time_division_remainder=1,
+        frame_rate=frame_rate,
+    )
+    return RouteByType(operator_map=[
+        (str, audio_loader),
+        (type(None), DataProcessingOperatorRaw()),
+    ])
 
 
 class LTX2TrainingModule(DiffusionTrainingModule):
@@ -19,6 +31,8 @@ class LTX2TrainingModule(DiffusionTrainingModule):
         extra_inputs=None,
         fp8_models=None,
         offload_models=None,
+        video_loss_weight=1.0,
+        audio_loss_weight=1.0,
         device="cpu",
         task="sft",
     ):
@@ -51,11 +65,27 @@ class LTX2TrainingModule(DiffusionTrainingModule):
         self.use_gradient_checkpointing_offload = use_gradient_checkpointing_offload
         self.extra_inputs = extra_inputs.split(",") if extra_inputs is not None else []
         self.fp8_models = fp8_models
+        self.video_loss_weight = video_loss_weight
+        self.audio_loss_weight = audio_loss_weight
         self.task = task
+        if self.video_loss_weight == 0 and self.audio_loss_weight == 0:
+            raise ValueError("video_loss_weight and audio_loss_weight cannot both be zero.")
         self.task_to_loss = {
             "sft:data_process": lambda pipe, *args: args,
-            "sft": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTAudioVideoLoss(pipe, **inputs_shared, **inputs_posi),
-            "sft:train": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTAudioVideoLoss(pipe, **inputs_shared, **inputs_posi),
+            "sft": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTAudioVideoLoss(
+                pipe,
+                video_loss_weight=self.video_loss_weight,
+                audio_loss_weight=self.audio_loss_weight,
+                **inputs_shared,
+                **inputs_posi,
+            ),
+            "sft:train": lambda pipe, inputs_shared, inputs_posi, inputs_nega: FlowMatchSFTAudioVideoLoss(
+                pipe,
+                video_loss_weight=self.video_loss_weight,
+                audio_loss_weight=self.audio_loss_weight,
+                **inputs_shared,
+                **inputs_posi,
+            ),
         }
         
     def parse_extra_inputs(self, data, extra_inputs, inputs_shared):
@@ -65,11 +95,11 @@ class LTX2TrainingModule(DiffusionTrainingModule):
                 inputs_shared["input_images_indexes"] = [0]
                 inputs_shared["input_images_strength"] = 1.0
             else:
-                inputs_shared[extra_input] = data[extra_input]
+                inputs_shared[extra_input] = data.get(extra_input)
         return inputs_shared
     
     def get_pipeline_inputs(self, data):
-        inputs_posi = {"prompt": data["prompt"]}
+        inputs_posi = {"prompt": data.get("prompt", "")}
         inputs_nega = {}
         inputs_shared = {
             # Assume you are using this pipeline for inference,
@@ -138,7 +168,8 @@ if __name__ == "__main__":
         data_file_keys=args.data_file_keys.split(","),
         main_data_operator=video_processor,
         special_operator_map={
-            "input_audio": ToAbsolutePath(args.dataset_base_path) >> LoadAudioWithTorchaudio(num_frames=args.num_frames, time_division_factor=8, time_division_remainder=1, frame_rate=args.frame_rate),
+            "input_audio": build_optional_audio_operator(args.dataset_base_path, args.num_frames, args.frame_rate),
+            "retake_audio": build_optional_audio_operator(args.dataset_base_path, args.num_frames, args.frame_rate),
             "in_context_videos": RouteByType(operator_map=[
                 (str, video_processor),
                 (list, SequencialProcess(video_processor)),
@@ -161,6 +192,8 @@ if __name__ == "__main__":
         extra_inputs=args.extra_inputs,
         fp8_models=args.fp8_models,
         offload_models=args.offload_models,
+        video_loss_weight=args.video_loss_weight,
+        audio_loss_weight=args.audio_loss_weight,
         task=args.task,
         device="cpu" if args.initialize_model_on_cpu else accelerator.device,
     )

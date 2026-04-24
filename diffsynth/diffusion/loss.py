@@ -31,6 +31,8 @@ def FlowMatchSFTLoss(pipe: BasePipeline, **inputs):
 def FlowMatchSFTAudioVideoLoss(pipe: BasePipeline, **inputs):
     max_timestep_boundary = int(inputs.get("max_timestep_boundary", 1) * len(pipe.scheduler.timesteps))
     min_timestep_boundary = int(inputs.get("min_timestep_boundary", 0) * len(pipe.scheduler.timesteps))
+    video_loss_weight = float(inputs.get("video_loss_weight", 1.0))
+    audio_loss_weight = float(inputs.get("audio_loss_weight", 1.0))
 
     timestep_id = torch.randint(min_timestep_boundary, max_timestep_boundary, (1,))
     timestep = pipe.scheduler.timesteps[timestep_id].to(dtype=pipe.torch_dtype, device=pipe.device)
@@ -49,12 +51,16 @@ def FlowMatchSFTAudioVideoLoss(pipe: BasePipeline, **inputs):
     models = {name: getattr(pipe, name) for name in pipe.in_iteration_models}
     noise_pred, noise_pred_audio = pipe.model_fn(**models, **inputs, timestep=timestep)
 
-    loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
-    loss = loss * pipe.scheduler.training_weight(timestep)
-    if inputs.get("audio_input_latents") is not None:
+    loss = None
+    if video_loss_weight != 0:
+        loss = torch.nn.functional.mse_loss(noise_pred.float(), training_target.float())
+        loss = loss * pipe.scheduler.training_weight(timestep) * video_loss_weight
+    if inputs.get("audio_input_latents") is not None and audio_loss_weight != 0:
         loss_audio = torch.nn.functional.mse_loss(noise_pred_audio.float(), training_target_audio.float())
-        loss_audio = loss_audio * pipe.scheduler.training_weight(timestep)
-        loss = loss + loss_audio
+        loss_audio = loss_audio * pipe.scheduler.training_weight(timestep) * audio_loss_weight
+        loss = loss_audio if loss is None else loss + loss_audio
+    if loss is None:
+        raise ValueError("Both video_loss_weight and audio_loss_weight are zero, so no training loss is available.")
     return loss
 
 

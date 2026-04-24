@@ -1,4 +1,4 @@
-import math
+import math, warnings
 import torch, torchvision, imageio, os
 import imageio.v3 as iio
 from PIL import Image
@@ -73,6 +73,17 @@ class ImageCropAndResize(DataProcessingOperator):
         self.max_pixels = max_pixels
         self.height_division_factor = height_division_factor
         self.width_division_factor = width_division_factor
+        self.logged = False
+
+    def resize_only(self, image, target_height, target_width):
+        width, height = image.size
+        new_height, new_width = target_height, target_width
+        image = torchvision.transforms.functional.resize(
+            image,
+            (new_height, new_width),
+            interpolation=torchvision.transforms.InterpolationMode.BILINEAR
+        )
+        return image
 
     def crop_and_resize(self, image, target_height, target_width):
         width, height = image.size
@@ -88,17 +99,44 @@ class ImageCropAndResize(DataProcessingOperator):
     def get_height_width(self, image):
         if self.height is None or self.width is None:
             width, height = image.size
+            aspect_ratio = width / height
+            
             if width * height > self.max_pixels:
-                scale = (width * height / self.max_pixels) ** 0.5
-                height, width = int(height / scale), int(width / scale)
-            height = height // self.height_division_factor * self.height_division_factor
-            width = width // self.width_division_factor * self.width_division_factor
+                scale = math.sqrt(self.max_pixels / (width * height))
+                height = int(height * scale)
+                width = int(width * scale)
+            
+            while True:
+                new_height = height // self.height_division_factor * self.height_division_factor
+                new_width = width // self.width_division_factor * self.width_division_factor
+                if new_width * new_height <= self.max_pixels or new_height <= self.height_division_factor:
+                    height, width = new_height, new_width
+                    break
+                height -= self.height_division_factor
+                width = int(height * aspect_ratio)
         else:
             height, width = self.height, self.width
         return height, width
     
     def __call__(self, data: Image.Image):
-        image = self.crop_and_resize(data, *self.get_height_width(data))
+        orig_width, orig_height = data.size
+        orig_pixels = orig_width * orig_height
+        
+        if self.height is None and self.width is None:
+            target_height, target_width = self.get_height_width(data)
+            image = self.resize_only(data, target_height, target_width)
+        else:
+            image = self.crop_and_resize(data, *self.get_height_width(data))
+        
+        new_width, new_height = image.size
+        new_pixels = new_width * new_height
+        
+        if not self.logged:
+            print(f"[ImageCropAndResize] Resolution change:")
+            print(f"[ImageCropAndResize]   Original: {orig_width}x{orig_height} ({orig_pixels:,} pixels)")
+            print(f"[ImageCropAndResize]   Processed: {new_width}x{new_height} ({new_pixels:,} pixels)")
+            self.logged = True
+            
         return image
 
 
@@ -151,12 +189,22 @@ class LoadVideo(DataProcessingOperator, FrameSamplerByRateMixin):
         FrameSamplerByRateMixin.__init__(self, num_frames, time_division_factor, time_division_remainder, frame_rate, fix_frame_rate)
         # frame_processor is build in the video loader for high efficiency.
         self.frame_processor = frame_processor
+        self.logged_files = set()
 
     def __call__(self, data: str):
         reader = self.get_reader(data)
         raw_frame_rate = reader.get_meta_data()['fps']
-        num_frames = self.get_num_frames(reader)
         total_raw_frames = reader.count_frames()
+        num_frames = self.get_num_frames(reader)
+        
+        if data not in self.logged_files:
+            orig_duration = total_raw_frames / raw_frame_rate
+            new_duration = num_frames / self.frame_rate
+            print(f"[LoadVideo] Processing file: {os.path.basename(data)}")
+            print(f"[LoadVideo]   Original: {total_raw_frames} frames @ {raw_frame_rate:.1f}fps ({orig_duration:.2f}s)")
+            print(f"[LoadVideo]   Processed: {num_frames} frames @ {self.frame_rate:.1f}fps ({new_duration:.2f}s)")
+            self.logged_files.add(data)
+        
         frames = []
         for frame_id in range(num_frames):
             frame_id = self.map_single_frame_id(frame_id, raw_frame_rate, total_raw_frames)
@@ -260,15 +308,19 @@ class LoadAudioWithTorchaudio(DataProcessingOperator, FrameSamplerByRateMixin):
         FrameSamplerByRateMixin.__init__(self, num_frames, time_division_factor, time_division_remainder, frame_rate, fix_frame_rate)
 
     def __call__(self, data: str):
-        reader = self.get_reader(data)
-        num_frames = self.get_num_frames(reader)
-        duration = num_frames / self.frame_rate
-        waveform, sample_rate = torchaudio.load(data)
-        target_samples = int(duration * sample_rate)
-        current_samples = waveform.shape[-1]
-        if current_samples > target_samples:
-            waveform = waveform[..., :target_samples]
-        elif current_samples < target_samples:
-            padding = target_samples - current_samples
-            waveform = torch.nn.functional.pad(waveform, (0, padding))
-        return waveform, sample_rate
+        try:
+            reader = self.get_reader(data)
+            num_frames = self.get_num_frames(reader)
+            duration = num_frames / self.frame_rate
+            waveform, sample_rate = torchaudio.load(data)
+            target_samples = int(duration * sample_rate)
+            current_samples = waveform.shape[-1]
+            if current_samples > target_samples:
+                waveform = waveform[..., :target_samples]
+            elif current_samples < target_samples:
+                padding = target_samples - current_samples
+                waveform = torch.nn.functional.pad(waveform, (0, padding))
+            return waveform, sample_rate
+        except:
+            warnings.warn(f"Cannot load audio in {data}. The audio will be `None`.")
+            return None

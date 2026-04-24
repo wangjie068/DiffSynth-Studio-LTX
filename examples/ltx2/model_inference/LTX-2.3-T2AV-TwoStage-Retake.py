@@ -29,6 +29,7 @@ pipe = LTX2AudioVideoPipeline.from_pretrained(
 
 dataset_snapshot_download("DiffSynth-Studio/example_video_dataset", allow_file_pattern="ltx2/*", local_dir="data/example_video_dataset")
 prompt = "A beautiful woman with a flower crown is singing happily under a blooming cherry tree. She sings: 'Mummy don't know daddy's getting hot. At the body shop'"
+prompt = "A luxury vertical skincare ad showcases ARTMIS products, glowing textures, elegant blue-and-gold packaging, and a model’s radiant beauty in a cinematic, premium beauty campaign.Add appropriate background music and sound effects to this video; ensure they complement the content and do not alter the original footage."
 negative_prompt = (
     "blurry, out of focus, overexposed, underexposed, low contrast, washed out colors, excessive noise, "
     "grainy texture, poor lighting, flickering, motion blur, distorted proportions, unnatural skin tones, "
@@ -45,6 +46,18 @@ negative_prompt = (
 
 height, width, num_frames, frame_rate = 512 * 2, 768 * 2, 121, 24
 path = "data/example_video_dataset/ltx2/video2.mp4"
+
+from decord import VideoReader
+
+path = "/mnt/bn/genai-nebula/wangjie/Video_Gen_Long/DiffSynth-Studio/ads_video.mp4"
+vr = VideoReader(path)
+
+height, width, _ = vr[0].shape  # 读取第一帧的 shape (H, W, C)
+original_num_frames = len(vr)
+frame_rate = vr.get_avg_fps()
+num_frames = ((original_num_frames - 1) // 8) * 8 + 1
+print(f"原始帧数: {original_num_frames}, 为适配 LTX-Video 已调整为: {num_frames}，视频分辨率为: {height}x{width}")
+
 video = VideoData(path, height=height, width=width).raw_data()[:num_frames]
 assert len(video) == num_frames, f"Input video has {len(video)} frames, but expected {num_frames} frames based on the specified num_frames argument."
 duration = num_frames / frame_rate
@@ -56,10 +69,12 @@ video, audio = pipe(
     prompt=prompt,
     negative_prompt=negative_prompt,
     retake_video=video,
-    retake_video_regions=[(1, 2), (3, 4)],
-    retake_audio=audio,
-    audio_sample_rate=audio_sample_rate,
-    retake_audio_regions=[(0, 1), (4, 5)],
+    # retake_video_regions=[(1, 2), (3, 4)],
+    # retake_video_regions=[(1, 2)],
+    # retake_audio=audio,
+    # audio_sample_rate=audio_sample_rate,
+    # retake_audio_regions=[(0, 1), (4, 5)],
+    # retake_audio_regions=[(0, 5), (7, 9), (10, 12)],
     seed=43,
     height=height,
     width=width,

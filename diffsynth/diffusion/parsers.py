@@ -36,6 +36,8 @@ def add_training_config(parser: argparse.ArgumentParser):
     parser.add_argument("--trainable_models", type=str, default=None, help="Models to train, e.g., dit, vae, text_encoder.")
     parser.add_argument("--find_unused_parameters", default=False, action="store_true", help="Whether to find unused parameters in DDP.")
     parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay.")
+    parser.add_argument("--video_loss_weight", type=float, default=1.0, help="Weight applied to the video denoising loss.")
+    parser.add_argument("--audio_loss_weight", type=float, default=1.0, help="Weight applied to the audio denoising loss.")
     parser.add_argument("--task", type=str, default="sft", required=False, help="Task type.")
     return parser
 
