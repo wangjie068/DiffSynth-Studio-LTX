@@ -23,8 +23,8 @@ cd "${REPO_ROOT}"
 DATASET_BASE_PATH="${DATASET_BASE_PATH:-/mnt/bn/genai-nebula/wangjie/Video_Gen_Long/DiffSynth-Studio/data/train_data}"
 DATASET_METADATA_PATH="${DATASET_METADATA_PATH:-${DATASET_BASE_PATH}/metadata_audio_hybrid.json}"
 MODEL_SOURCE_BASE_PATH="${MODEL_SOURCE_BASE_PATH:-/mnt/bn/genai-nebula/wangjie/Video_Gen_Long/DiffSynth-Studio/models}"
-SHM_MODEL_BASE_PATH="${SHM_MODEL_BASE_PATH:-/dev/shm/diffsynth_models}"
-MODEL_CACHE_MODE="${MODEL_CACHE_MODE:-copy}"
+SHM_MODEL_BASE_PATH="${SHM_MODEL_BASE_PATH:-/dev/shm/diffsynth_model_links}"
+MODEL_CACHE_MODE="${MODEL_CACHE_MODE:-symlink}"
 RUN_DATA_PRECHECK="${RUN_DATA_PRECHECK:-1}"
 MIN_EDIT_REGION_SECONDS="${MIN_EDIT_REGION_SECONDS:-0.25}"
 HEIGHT="${HEIGHT:-}"
@@ -37,6 +37,10 @@ LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 LORA_RANK="${LORA_RANK:-16}"
 DATASET_REPEAT="${DATASET_REPEAT:-50}"
 OUTPUT_NAME="${OUTPUT_NAME:-LTX2.3-T2AV-Retake_lora}"
+MODEL_RUNTIME_BASE_PATH="${SHM_MODEL_BASE_PATH}"
+if [[ "${MODEL_CACHE_MODE}" == "none" ]]; then
+  MODEL_RUNTIME_BASE_PATH="${MODEL_SOURCE_BASE_PATH}"
+fi
 
 VIDEO_SIZE_ARGS=(--max_pixels "${MAX_PIXELS}" --num_frames "${NUM_FRAMES}")
 if [[ -n "${HEIGHT}" || -n "${WIDTH}" ]]; then
@@ -87,6 +91,12 @@ prepare_model_cache() {
     if [[ ! -e "${target_dir}" && ! -L "${target_dir}" ]]; then
       log_step "Creating model cache symlink: ${target_dir} -> ${source_dir}"
       ln -s "${source_dir}" "${target_dir}"
+    elif [[ -L "${target_dir}" || -f "${ready_file}" ]]; then
+      log_step "Model cache symlink/path exists: ${target_dir}"
+    else
+      echo "Existing non-symlink cache path may be incomplete: ${target_dir}" >&2
+      echo "Use a fresh SHM_MODEL_BASE_PATH, remove the old cache manually, or set MODEL_CACHE_MODE=none." >&2
+      exit 1
     fi
   elif [[ "${MODEL_CACHE_MODE}" == "none" ]]; then
     log_step "Skipping model cache for ${source_dir}"
@@ -114,13 +124,13 @@ log_step "Preparing model cache"
 prepare_model_cache "${MODEL_SOURCE_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage" "DiffSynth-Studio/LTX-2.3-Repackage"
 prepare_model_cache "${MODEL_SOURCE_BASE_PATH}/google/gemma-3-12b-it-qat-q4_0-unquantized" "google/gemma-3-12b-it-qat-q4_0-unquantized"
 
-require_path "${SHM_MODEL_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/text_encoder_post_modules.safetensors"
-require_path "${SHM_MODEL_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/video_vae_encoder.safetensors"
-require_path "${SHM_MODEL_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/audio_vae_encoder.safetensors"
-require_path "${SHM_MODEL_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/transformer.safetensors"
-require_path "${SHM_MODEL_BASE_PATH}/google/gemma-3-12b-it-qat-q4_0-unquantized"
+require_path "${MODEL_RUNTIME_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/text_encoder_post_modules.safetensors"
+require_path "${MODEL_RUNTIME_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/video_vae_encoder.safetensors"
+require_path "${MODEL_RUNTIME_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/audio_vae_encoder.safetensors"
+require_path "${MODEL_RUNTIME_BASE_PATH}/DiffSynth-Studio/LTX-2.3-Repackage/transformer.safetensors"
+require_path "${MODEL_RUNTIME_BASE_PATH}/google/gemma-3-12b-it-qat-q4_0-unquantized"
 
-export DIFFSYNTH_MODEL_BASE_PATH="${SHM_MODEL_BASE_PATH}"
+export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_RUNTIME_BASE_PATH}"
 export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
 
 log_step "Starting data-process stage"
