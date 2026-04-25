@@ -128,6 +128,32 @@ def get_video_duration(path, frame_rate):
         return get_video_duration_with_imageio(path, frame_rate)
 
 
+def get_audio_duration_with_ffprobe(path):
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=duration",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        path,
+    ]
+    result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    payload = json.loads(result.stdout)
+    streams = payload.get("streams", [])
+    if not streams:
+        raise ValueError("no audio stream found")
+    duration_value = streams[0].get("duration") or payload.get("format", {}).get("duration")
+    if is_missing_value(duration_value):
+        raise ValueError("ffprobe did not report audio duration")
+    return float(duration_value)
+
+
 def get_training_duration(video_duration, num_frames, frame_rate):
     total_available_frames = int(math.floor(video_duration * frame_rate))
     training_frames = num_frames
@@ -142,6 +168,14 @@ def get_training_duration(video_duration, num_frames, frame_rate):
 
 def check_audio(path):
     import torchaudio
+
+    try:
+        duration = get_audio_duration_with_ffprobe(path)
+        if duration <= 0:
+            raise ValueError("audio duration is zero")
+        return duration
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+        pass
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", message=".*torchaudio.load_with_torchcodec.*")
@@ -211,7 +245,10 @@ def main():
 
             _, _, video_duration = get_video_duration(video_path, args.frame_rate)
             training_duration = get_training_duration(video_duration, args.num_frames, args.frame_rate)
-            input_audio_duration = check_audio(input_audio_path)
+            try:
+                input_audio_duration = check_audio(input_audio_path)
+            except Exception as error:
+                raise ValueError(f"input_audio invalid: {error}") from error
             if input_audio_duration <= 0:
                 raise ValueError("input_audio duration is zero")
 
@@ -220,7 +257,10 @@ def main():
             else:
                 if not os.path.exists(retake_audio_path):
                     raise FileNotFoundError(f"retake_audio not found: {retake_audio_path}")
-                check_audio(retake_audio_path)
+                try:
+                    check_audio(retake_audio_path)
+                except Exception as error:
+                    raise ValueError(f"retake_audio invalid: {error}") from error
                 regions = parse_regions(row.get("retake_audio_regions"))
                 validate_regions(regions, training_duration, args.min_edit_region_seconds)
                 edit_count += 1

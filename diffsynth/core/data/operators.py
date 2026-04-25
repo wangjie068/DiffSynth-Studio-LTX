@@ -1,4 +1,4 @@
-import math, warnings
+import math, subprocess, warnings
 import torch, torchvision, imageio, os
 import imageio.v3 as iio
 from PIL import Image
@@ -319,9 +319,40 @@ class LoadAudioWithTorchaudio(DataProcessingOperator, FrameSamplerByRateMixin):
         except Exception:
             return self.num_frames / self.frame_rate
 
+    def load_audio_with_ffmpeg(self, data: str, sample_rate=48000, channels=2):
+        command = [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            data,
+            "-vn",
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "-ac",
+            str(channels),
+            "-ar",
+            str(sample_rate),
+            "pipe:1",
+        ]
+        result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        waveform = torch.frombuffer(bytearray(result.stdout), dtype=torch.float32)
+        if waveform.numel() == 0:
+            raise ValueError("ffmpeg decoded zero audio samples")
+        waveform = waveform.reshape(-1, channels).transpose(0, 1).contiguous()
+        return waveform, sample_rate
+
+    def load_audio(self, data: str):
+        try:
+            return torchaudio.load(data)
+        except Exception:
+            return self.load_audio_with_ffmpeg(data)
+
     def __call__(self, data: str):
         try:
-            waveform, sample_rate = torchaudio.load(data)
+            waveform, sample_rate = self.load_audio(data)
             target_samples = max(1, int(self.get_target_duration(data) * sample_rate))
             current_samples = waveform.shape[-1]
             if current_samples > target_samples:
