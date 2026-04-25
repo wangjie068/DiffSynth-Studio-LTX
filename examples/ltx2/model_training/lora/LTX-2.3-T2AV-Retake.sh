@@ -26,6 +26,7 @@ MODEL_SOURCE_BASE_PATH="${MODEL_SOURCE_BASE_PATH:-/mnt/bn/genai-nebula/wangjie/V
 SHM_MODEL_BASE_PATH="${SHM_MODEL_BASE_PATH:-/dev/shm/diffsynth_model_links}"
 MODEL_CACHE_MODE="${MODEL_CACHE_MODE:-symlink}"
 RUN_DATA_PRECHECK="${RUN_DATA_PRECHECK:-1}"
+RUN_DATA_PROCESS="${RUN_DATA_PROCESS:-1}"
 MIN_EDIT_REGION_SECONDS="${MIN_EDIT_REGION_SECONDS:-0.25}"
 HEIGHT="${HEIGHT:-}"
 WIDTH="${WIDTH:-}"
@@ -38,6 +39,7 @@ LORA_RANK="${LORA_RANK:-16}"
 DATASET_REPEAT="${DATASET_REPEAT:-50}"
 OUTPUT_NAME="${OUTPUT_NAME:-LTX2.3-T2AV-Retake_lora}"
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
+FIND_UNUSED_PARAMETERS="${FIND_UNUSED_PARAMETERS:-1}"
 MODEL_RUNTIME_BASE_PATH="${SHM_MODEL_BASE_PATH}"
 if [[ "${MODEL_CACHE_MODE}" == "none" ]]; then
   MODEL_RUNTIME_BASE_PATH="${MODEL_SOURCE_BASE_PATH}"
@@ -45,6 +47,10 @@ fi
 
 VIDEO_SIZE_ARGS=(--max_pixels "${MAX_PIXELS}" --num_frames "${NUM_FRAMES}")
 ACCELERATE_ARGS=(--num_processes "${NUM_PROCESSES}")
+DDP_ARGS=()
+if [[ "${FIND_UNUSED_PARAMETERS}" == "1" ]]; then
+  DDP_ARGS+=(--find_unused_parameters)
+fi
 if [[ -n "${HEIGHT}" || -n "${WIDTH}" ]]; then
   if [[ -z "${HEIGHT}" || -z "${WIDTH}" ]]; then
     echo "HEIGHT and WIDTH must be set together. Leave both empty to enable dynamic resolution." >&2
@@ -109,7 +115,7 @@ prepare_model_cache() {
   fi
 }
 
-log_step "Config: max_pixels=${MAX_PIXELS}, num_frames=${NUM_FRAMES}, frame_rate=${FRAME_RATE}, precheck=${RUN_DATA_PRECHECK}, cache_mode=${MODEL_CACHE_MODE}, num_processes=${NUM_PROCESSES}"
+log_step "Config: max_pixels=${MAX_PIXELS}, num_frames=${NUM_FRAMES}, frame_rate=${FRAME_RATE}, precheck=${RUN_DATA_PRECHECK}, data_process=${RUN_DATA_PROCESS}, cache_mode=${MODEL_CACHE_MODE}, num_processes=${NUM_PROCESSES}, find_unused_parameters=${FIND_UNUSED_PARAMETERS}"
 
 if [[ "${RUN_DATA_PRECHECK}" == "1" ]]; then
   log_step "Running dataset precheck: ${DATASET_METADATA_PATH}"
@@ -137,27 +143,32 @@ export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
 
-log_step "Starting data-process stage"
-accelerate launch "${ACCELERATE_ARGS[@]}" examples/ltx2/model_training/train.py \
-  --dataset_base_path "${DATASET_BASE_PATH}" \
-  --dataset_metadata_path "${DATASET_METADATA_PATH}" \
-  --data_file_keys "video,input_audio,retake_audio" \
-  --extra_inputs "input_audio,retake_audio,retake_audio_regions" \
-  "${VIDEO_SIZE_ARGS[@]}" \
-  --frame_rate "${FRAME_RATE}" \
-  --dataset_repeat 1 \
-  --model_id_with_origin_paths "DiffSynth-Studio/LTX-2.3-Repackage:text_encoder_post_modules.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:video_vae_encoder.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:audio_vae_encoder.safetensors,google/gemma-3-12b-it-qat-q4_0-unquantized:model-*.safetensors" \
-  --learning_rate "${LEARNING_RATE}" \
-  --num_epochs "${NUM_EPOCHS}" \
-  --video_loss_weight 0.0 \
-  --audio_loss_weight 1.0 \
-  --remove_prefix_in_ckpt "pipe.dit." \
-  --output_path "./models/train/${OUTPUT_NAME}-splited-cache" \
-  --lora_base_model "dit" \
-  --lora_target_modules "to_k,to_q,to_v,to_out.0" \
-  --lora_rank "${LORA_RANK}" \
-  --use_gradient_checkpointing \
-  --task "sft:data_process"
+if [[ "${RUN_DATA_PROCESS}" == "1" ]]; then
+  log_step "Starting data-process stage"
+  accelerate launch "${ACCELERATE_ARGS[@]}" examples/ltx2/model_training/train.py \
+    --dataset_base_path "${DATASET_BASE_PATH}" \
+    --dataset_metadata_path "${DATASET_METADATA_PATH}" \
+    --data_file_keys "video,input_audio,retake_audio" \
+    --extra_inputs "input_audio,retake_audio,retake_audio_regions" \
+    "${VIDEO_SIZE_ARGS[@]}" \
+    --frame_rate "${FRAME_RATE}" \
+    --dataset_repeat 1 \
+    --model_id_with_origin_paths "DiffSynth-Studio/LTX-2.3-Repackage:text_encoder_post_modules.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:video_vae_encoder.safetensors,DiffSynth-Studio/LTX-2.3-Repackage:audio_vae_encoder.safetensors,google/gemma-3-12b-it-qat-q4_0-unquantized:model-*.safetensors" \
+    --learning_rate "${LEARNING_RATE}" \
+    --num_epochs "${NUM_EPOCHS}" \
+    --video_loss_weight 0.0 \
+    --audio_loss_weight 1.0 \
+    --remove_prefix_in_ckpt "pipe.dit." \
+    --output_path "./models/train/${OUTPUT_NAME}-splited-cache" \
+    --lora_base_model "dit" \
+    --lora_target_modules "to_k,to_q,to_v,to_out.0" \
+    --lora_rank "${LORA_RANK}" \
+    --use_gradient_checkpointing \
+    "${DDP_ARGS[@]}" \
+    --task "sft:data_process"
+else
+  log_step "Skipping data-process stage; using ./models/train/${OUTPUT_NAME}-splited-cache"
+fi
 
 log_step "Starting LoRA train stage"
 accelerate launch "${ACCELERATE_ARGS[@]}" examples/ltx2/model_training/train.py \
@@ -178,4 +189,5 @@ accelerate launch "${ACCELERATE_ARGS[@]}" examples/ltx2/model_training/train.py 
   --lora_target_modules "to_k,to_q,to_v,to_out.0" \
   --lora_rank "${LORA_RANK}" \
   --use_gradient_checkpointing \
+  "${DDP_ARGS[@]}" \
   --task "sft:train"
