@@ -3,6 +3,7 @@ import csv
 import json
 import math
 import os
+import subprocess
 import sys
 import warnings
 
@@ -59,10 +60,50 @@ def parse_regions(value):
     return regions
 
 
-def get_video_duration(path, frame_rate):
+def get_video_duration_with_ffprobe(path, frame_rate):
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=avg_frame_rate,r_frame_rate,nb_frames,duration",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        path,
+    ]
+    result = subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    payload = json.loads(result.stdout)
+    stream = payload.get("streams", [{}])[0]
+    format_info = payload.get("format", {})
+
+    duration_value = stream.get("duration") or format_info.get("duration")
+    if is_missing_value(duration_value):
+        raise ValueError("ffprobe did not report video duration")
+    duration = float(duration_value)
+
+    fps_value = stream.get("avg_frame_rate") or stream.get("r_frame_rate")
+    raw_fps = frame_rate
+    if fps_value and fps_value != "0/0":
+        numerator, denominator = fps_value.split("/")
+        raw_fps = float(numerator) / float(denominator)
+
+    frame_count = stream.get("nb_frames")
+    if is_missing_value(frame_count) or str(frame_count).upper() == "N/A":
+        frame_count = int(math.floor(duration * raw_fps))
+    return int(frame_count), raw_fps, duration
+
+
+def get_video_duration_with_imageio(path, frame_rate):
     import imageio
 
-    reader = imageio.get_reader(path)
+    try:
+        reader = imageio.get_reader(path)
+    except Exception:
+        reader = imageio.get_reader(path, format="ffmpeg")
     try:
         metadata = reader.get_meta_data()
         raw_fps = float(metadata.get("fps") or frame_rate)
@@ -78,6 +119,13 @@ def get_video_duration(path, frame_rate):
         return total_frames, raw_fps, duration
     finally:
         reader.close()
+
+
+def get_video_duration(path, frame_rate):
+    try:
+        return get_video_duration_with_ffprobe(path, frame_rate)
+    except (FileNotFoundError, subprocess.SubprocessError, ValueError, json.JSONDecodeError):
+        return get_video_duration_with_imageio(path, frame_rate)
 
 
 def get_training_duration(video_duration, num_frames, frame_rate):

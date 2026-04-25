@@ -154,7 +154,10 @@ class FrameSamplerByRateMixin:
         self.fix_frame_rate = fix_frame_rate
 
     def get_reader(self, data: str):
-        return imageio.get_reader(data)
+        try:
+            return imageio.get_reader(data)
+        except Exception:
+            return imageio.get_reader(data, format="ffmpeg")
 
     def get_available_num_frames(self, reader):
         if not self.fix_frame_rate:
