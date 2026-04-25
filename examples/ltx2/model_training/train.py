@@ -1,4 +1,5 @@
 import torch, os, argparse, accelerate, warnings, math
+from torch.distributed.elastic.multiprocessing.errors import record
 from diffsynth.core import UnifiedDataset
 from diffsynth.core.data.operators import LoadAudioWithTorchaudio, RouteByType, SequencialProcess
 from diffsynth.pipelines.ltx2_audio_video import LTX2AudioVideoPipeline, ModelConfig
@@ -169,7 +170,8 @@ def ltx2_parser():
     return parser
 
 
-if __name__ == "__main__":
+@record
+def main():
     parser = ltx2_parser()
     args = parser.parse_args()
     accelerator = accelerate.Accelerator(
@@ -238,3 +240,7 @@ if __name__ == "__main__":
         "direct_distill:train": launch_training_task,
     }
     launcher_map[args.task](accelerator, dataset, model, model_logger, args=args)
+
+
+if __name__ == "__main__":
+    main()

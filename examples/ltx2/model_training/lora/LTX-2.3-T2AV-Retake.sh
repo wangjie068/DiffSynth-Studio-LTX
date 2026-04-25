@@ -37,12 +37,14 @@ LEARNING_RATE="${LEARNING_RATE:-1e-4}"
 LORA_RANK="${LORA_RANK:-16}"
 DATASET_REPEAT="${DATASET_REPEAT:-50}"
 OUTPUT_NAME="${OUTPUT_NAME:-LTX2.3-T2AV-Retake_lora}"
+NUM_PROCESSES="${NUM_PROCESSES:-1}"
 MODEL_RUNTIME_BASE_PATH="${SHM_MODEL_BASE_PATH}"
 if [[ "${MODEL_CACHE_MODE}" == "none" ]]; then
   MODEL_RUNTIME_BASE_PATH="${MODEL_SOURCE_BASE_PATH}"
 fi
 
 VIDEO_SIZE_ARGS=(--max_pixels "${MAX_PIXELS}" --num_frames "${NUM_FRAMES}")
+ACCELERATE_ARGS=(--num_processes "${NUM_PROCESSES}")
 if [[ -n "${HEIGHT}" || -n "${WIDTH}" ]]; then
   if [[ -z "${HEIGHT}" || -z "${WIDTH}" ]]; then
     echo "HEIGHT and WIDTH must be set together. Leave both empty to enable dynamic resolution." >&2
@@ -107,7 +109,7 @@ prepare_model_cache() {
   fi
 }
 
-log_step "Config: max_pixels=${MAX_PIXELS}, num_frames=${NUM_FRAMES}, frame_rate=${FRAME_RATE}, precheck=${RUN_DATA_PRECHECK}, cache_mode=${MODEL_CACHE_MODE}"
+log_step "Config: max_pixels=${MAX_PIXELS}, num_frames=${NUM_FRAMES}, frame_rate=${FRAME_RATE}, precheck=${RUN_DATA_PRECHECK}, cache_mode=${MODEL_CACHE_MODE}, num_processes=${NUM_PROCESSES}"
 
 if [[ "${RUN_DATA_PRECHECK}" == "1" ]]; then
   log_step "Running dataset precheck: ${DATASET_METADATA_PATH}"
@@ -132,9 +134,11 @@ require_path "${MODEL_RUNTIME_BASE_PATH}/google/gemma-3-12b-it-qat-q4_0-unquanti
 
 export DIFFSYNTH_MODEL_BASE_PATH="${MODEL_RUNTIME_BASE_PATH}"
 export DIFFSYNTH_SKIP_DOWNLOAD="${DIFFSYNTH_SKIP_DOWNLOAD:-true}"
+export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
+export TORCH_DISTRIBUTED_DEBUG="${TORCH_DISTRIBUTED_DEBUG:-DETAIL}"
 
 log_step "Starting data-process stage"
-accelerate launch examples/ltx2/model_training/train.py \
+accelerate launch "${ACCELERATE_ARGS[@]}" examples/ltx2/model_training/train.py \
   --dataset_base_path "${DATASET_BASE_PATH}" \
   --dataset_metadata_path "${DATASET_METADATA_PATH}" \
   --data_file_keys "video,input_audio,retake_audio" \
@@ -156,7 +160,7 @@ accelerate launch examples/ltx2/model_training/train.py \
   --task "sft:data_process"
 
 log_step "Starting LoRA train stage"
-accelerate launch examples/ltx2/model_training/train.py \
+accelerate launch "${ACCELERATE_ARGS[@]}" examples/ltx2/model_training/train.py \
   --dataset_base_path "./models/train/${OUTPUT_NAME}-splited-cache" \
   --data_file_keys "video,input_audio,retake_audio" \
   --extra_inputs "input_audio,retake_audio,retake_audio_regions" \
